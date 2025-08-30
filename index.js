@@ -15,7 +15,7 @@ const aclRoutes = require('./routes/acl');
 
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', true); // behind nginx proxy
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -35,10 +35,10 @@ app.use(corsMw);
 app.use(limiter);
 app.use('/cleanup', apiKey, cleanupRoutes);
 app.use('/tools', apiKey, toolsRoutes);
-// Proteksi semua route berikut pakai API Key:
+// Protected routes require x-api-key
+app.use('/metrics', apiKey, metricsRoutes);
 app.use('/vpn', apiKey, userRoutes);
 app.use('/hub', apiKey, hubRoutes);
-app.use('/metrics', apiKey, metricsRoutes);
 app.use('/acl', apiKey, aclRoutes);
 
 
