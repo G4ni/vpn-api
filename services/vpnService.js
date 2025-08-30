@@ -62,22 +62,40 @@ function _fresh(bucket) {
   return _cache[bucket].data && (Date.now() - _cache[bucket].ts) < CACHE_TTL_MS;
 }
 
+/// List user (support format vertikal & horizontal, filter ketat)
 async function listUsers() {
-  if (_fresh('users')) return _cache.users.data;
-
   const raw = await runVpnCmd('UserList');
-  const lines = raw.split('\n').filter(l => l.includes('|'));
-  const users = lines.map(line => {
-    const parts = line.split('|').map(p => p.trim());
-    return { name: parts[0], group: parts[1] || null };
-  }).filter(u => u.name && !/^user\s*name$/i.test(u.name));
+  const lines = raw.split('\n').map(l => l.trim());
 
+  const users = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (!L.includes('|')) continue;
+    const [k, v] = L.split('|').map(s => s.trim());
+
+    // format vertikal (key|value)
+    if (/^User\s*Name$/i.test(k) && v && v !== '(None)') {
+      users.push({ name: v, group: null });
+    }
+    // format horizontal fallback (User Name | Group Name)
+    else if (i > 0 && /user\s*name/i.test(lines[0]) && L.split('|').length >= 2) {
+      const cols = L.split('|').map(s => s.trim());
+      if (cols[0] && !/^User\s*Name$/i.test(cols[0]) && !/^[-+]+$/.test(cols[0])) {
+        users.push({ name: cols[0], group: cols[1] || null });
+      }
+    }
+  }
+
+  // Dedup: buang header/duplikat
   const seen = new Set();
-  const unique = users.filter(u => !seen.has(u.name) && seen.add(u.name));
-
-  _cache.users = { data: unique, ts: Date.now() };
-  return unique;
+  return users.filter(u => {
+    if (seen.has(u.name)) return false;
+    seen.add(u.name);
+    return true;
+  });
 }
+
 
 async function sessionListRaw() {
   return runVpnCmd('SessionList');
@@ -267,4 +285,3 @@ module.exports = {
   deleteAclById,
   ensureDirs
 };
-
