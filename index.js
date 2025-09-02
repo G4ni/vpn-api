@@ -40,6 +40,8 @@ app.use('/metrics', apiKey, metricsRoutes);
 app.use('/vpn', apiKey, userRoutes);
 app.use('/hub', apiKey, hubRoutes);
 app.use('/acl', apiKey, aclRoutes);
+app.use("/", require("./routes/cleanup"));
+
 
 
 // Helper untuk jalankan vpncmd

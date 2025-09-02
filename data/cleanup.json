@@ -1,0 +1,45 @@
+{
+  "thresholdDays": 30,
+  "auto": true,
+  "scheduleCron": "15 3 * * *",
+  "exclusions": [],
+  "totalRemoved": 0,
+  "lastCleanupTs": 1756829734285,
+  "history": [
+    {
+      "ts": 1756825493099,
+      "type": "Manual",
+      "removed": 0,
+      "criteria": "Inactive > 30 days",
+      "by": "Admin"
+    },
+    {
+      "ts": 1756825821467,
+      "type": "Manual",
+      "removed": 0,
+      "criteria": "Inactive > 30 days",
+      "by": "Admin"
+    },
+    {
+      "ts": 1756826809807,
+      "type": "Manual",
+      "removed": 0,
+      "criteria": "Inactive > 30 days",
+      "by": "Admin"
+    },
+    {
+      "ts": 1756829702780,
+      "type": "Manual",
+      "removed": 0,
+      "criteria": "Inactive > 30 days",
+      "by": "Admin"
+    },
+    {
+      "ts": 1756829734285,
+      "type": "Manual",
+      "removed": 0,
+      "criteria": "Inactive > 30 days",
+      "by": "Admin"
+    }
+  ]
+}
