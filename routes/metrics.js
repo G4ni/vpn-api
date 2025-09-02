@@ -1,144 +1,212 @@
-const express = require("express");
-const os = require("os");
-const fs = require("fs");
-const { execSync } = require("child_process");
-const vpnService = require("../services/vpnService");
-
+// routes/metrics.js
+const express = require('express');
+const os = require('os');
+const fs = require('fs');
+const { execSync } = require('child_process');
 const router = express.Router();
 
-/* ---------- Helpers ---------- */
-function readNetTotals() {
+// Ambil vpnService (nama fungsi bisa beda antar repo, jadi kita adaptif)
+const vpnService = require('../services/vpnService');
+
+// ---------- Helpers: pemanggil adaptif ke vpnService ----------
+async function callListUsers() {
+  const fn =
+    vpnService.listUsers ||
+    vpnService.userList ||
+    vpnService.UserList ||
+    vpnService.getUsers;
+  if (!fn) return [];
+  const out = await fn();
+  // normalisasi: array of objects
+  if (Array.isArray(out)) return out;
+  if (out && Array.isArray(out.users)) return out.users;
+  return [];
+}
+
+async function callListSessions() {
+  const fn =
+    vpnService.listSessions ||
+    vpnService.sessionList ||
+    vpnService.SessionList ||
+    vpnService.getSessions;
+  if (!fn) return [];
+  const out = await fn();
+  if (Array.isArray(out)) return out;
+  if (out && Array.isArray(out.sessions)) return out.sessions;
+  return [];
+}
+
+// ---------- CPU usage via /proc/stat delta ----------
+let lastCpuTimes = null;
+function readProcStat() {
+  // baris pertama 'cpu  user nice system idle iowait irq softirq steal guest guest_nice'
+  const text = fs.readFileSync('/proc/stat', 'utf8');
+  const line = text.split('\n')[0];
+  const parts = line.trim().split(/\s+/).slice(1).map(n => Number(n) || 0);
+  const [user, nice, system, idle, iowait, irq, softirq, steal] = parts;
+  const idleTotal = idle + iowait;
+  const nonIdle = user + nice + system + irq + softirq + steal;
+  const total = idleTotal + nonIdle;
+  return { idleTotal, total };
+}
+
+function sampleCpuPercent() {
   try {
-    const raw = fs.readFileSync("/proc/net/dev", "utf8");
-    let rx = 0, tx = 0;
-    raw.split("\n").forEach(line => {
-      const [ifc, rest] = line.split(":");
-      if (!rest) return;
-      const nums = rest.trim().split(/\s+/).map(Number);
-      if (nums.length >= 16) {
-        rx += nums[0] || 0;   // rx_bytes
-        tx += nums[8] || 0;   // tx_bytes
-      }
-    });
-    return { rx, tx };
+    const cur = readProcStat();
+    if (!lastCpuTimes) {
+      lastCpuTimes = cur;
+      return 0; // first sample
+    }
+    const totald = cur.total - lastCpuTimes.total;
+    const idled = cur.idleTotal - lastCpuTimes.idleTotal;
+    lastCpuTimes = cur;
+    if (totald <= 0) return 0;
+    const usage = (1 - idled / totald) * 100;
+    // clamp
+    return Math.max(0, Math.min(100, usage));
   } catch {
-    return { rx: 0, tx: 0 };
+    // fallback loadavg
+    const load1 = os.loadavg()[0];
+    const cores = os.cpus()?.length || 1;
+    return Math.max(0, Math.min(100, (load1 / cores) * 100));
   }
 }
 
-function readDisk() {
-  try {
-    const out = execSync("df -kP /").toString().trim().split("\n");
-    if (out.length >= 2) {
-      const cols = out[1].split(/\s+/);
-      const total = Number(cols[1]) * 1024;
-      const used  = Number(cols[2]) * 1024;
-      const free  = Number(cols[3]) * 1024;
-      const pct   = total > 0 ? Math.round((used / total) * 100) : 0;
-      return { total, used, free, pct };
-    }
-  } catch {}
-  return { total: 0, used: 0, free: 0, pct: 0 };
+// ---------- Mem ----------
+function getMem() {
+  const total = os.totalmem();
+  const free = os.freemem();
+  const used = total - free;
+  const percent = (used / total) * 100;
+  return {
+    percent: +percent.toFixed(2),
+    usedGb: +(used / 1_000_000_000).toFixed(2),
+    totalGb: +(total / 1_000_000_000).toFixed(2),
+  };
 }
 
-/* ---------- Sampler (5s) untuk RATE ---------- */
-let LAST = null; // { t, rx, tx }
-const RATE_HISTORY = []; // { t, rx_bps, tx_bps }
-const MAX_POINTS = 600;  // ~50 menit @5s
+// ---------- Disk (root filesystem) ----------
+function getDisk() {
+  try {
+    // gunakan df -k / untuk cross-distro
+    const out = execSync('df -k /').toString().split('\n')[1].trim().split(/\s+/);
+    const blocks = Number(out[1]) || 0; // 1K-blocks
+    const used = Number(out[2]) || 0;
+    const totalBytes = blocks * 1024;
+    const usedBytes = used * 1024;
+    const percent = totalBytes ? (usedBytes / totalBytes) * 100 : 0;
+    return {
+      percent: +percent.toFixed(2),
+      usedGb: +(usedBytes / 1_000_000_000).toFixed(2),
+      totalGb: +(totalBytes / 1_000_000_000).toFixed(2),
+    };
+  } catch {
+    return { percent: 0, usedGb: 0, totalGb: 0 };
+  }
+}
 
-function sampleRate() {
+// ---------- Net totals & rates dari /proc/net/dev ----------
+let lastNet = null;
+
+function readProcNetDevTotals() {
+  const text = fs.readFileSync('/proc/net/dev', 'utf8');
+  let rx = 0, tx = 0;
+  for (const line of text.split('\n').slice(2)) {
+    if (!line.trim()) continue;
+    const [ifacePart, rest] = line.split(':');
+    const iface = (ifacePart || '').trim();
+    if (!iface || iface === 'lo') continue; // skip loopback
+    const cols = (rest || '').trim().split(/\s+/).map(n => Number(n) || 0);
+    // urutan rx: bytes packets errs drop fifo frame compressed multicast
+    // urutan tx: bytes packets errs drop fifo colls carrier compressed
+    rx += (cols[0] || 0);
+    tx += (cols[8] || 0);
+  }
+  return { rxBytesTotal: rx, txBytesTotal: tx };
+}
+
+function sampleNet() {
   const now = Date.now();
-  const tot = readNetTotals(); // bytes total
-  if (!LAST) {
-    LAST = { t: now, rx: tot.rx, tx: tot.tx };
-    return { rx_bps: 0, tx_bps: 0, totals: tot };
+  const totals = readProcNetDevTotals();
+  if (!lastNet) {
+    lastNet = { ...totals, ts: now };
+    return { rxBps: 0, txBps: 0, ...totals, ts: now };
   }
-  const dt = (now - LAST.t) / 1000; // detik
-  let dRx = tot.rx - LAST.rx;
-  let dTx = tot.tx - LAST.tx;
-  // handle reset/overflow
-  if (dRx < 0) dRx = 0;
-  if (dTx < 0) dTx = 0;
-  const rx_bps = dt > 0 ? Math.round((dRx * 8) / dt) : 0; // bits/s
-  const tx_bps = dt > 0 ? Math.round((dTx * 8) / dt) : 0;
-
-  LAST = { t: now, rx: tot.rx, tx: tot.tx };
-
-  RATE_HISTORY.push({ t: now, rx_bps, tx_bps });
-  while (RATE_HISTORY.length > MAX_POINTS) RATE_HISTORY.shift();
-
-  return { rx_bps, tx_bps, totals: tot };
+  const dt = Math.max(1, (now - lastNet.ts) / 1000);
+  const rxBps = (totals.rxBytesTotal - lastNet.rxBytesTotal) / dt;
+  const txBps = (totals.txBytesTotal - lastNet.txBytesTotal) / dt;
+  lastNet = { ...totals, ts: now };
+  return { rxBps, txBps, ...totals, ts: now };
 }
 
-// inisialisasi & interval
-sampleRate();
-setInterval(sampleRate, 5000);
+// ---------- Uptime ----------
+function getUptime() {
+  return {
+    osUptimeSeconds: Math.floor(os.uptime()),
+    softEtherUptimeSeconds: null, // opsional: bisa diisi dari CLI vpncmd jika mau
+  };
+}
 
-/* ---------- Route ---------- */
-router.get("/", async (req, res) => {
+// ---------- Username sanitizer (exclude securenat) ----------
+function normUser(u) {
+  if (!u) return '';
+  let s = String(u).trim().toLowerCase();
+  s = s.replace(/@.*$/i, '');   // user@hub -> user
+  s = s.replace(/[\\/].*$/i, ''); // DOMAIN\user atau user/... -> user/domain
+  if (s === 'securenat') return ''; // EXCLUDE
+  return s;
+}
+
+// ---------- Route ----------
+router.get('/', async (req, res) => {
+  const tsStart = Date.now();
   try {
-    // ambil snapshot rate terbaru (juga mengembalikan totals)
-    const snap = sampleRate();
+    // CPU sample dulu agar delta valid
+    const cpuPercent = sampleCpuPercent();
 
-    const uptimeSystem = Math.round(os.uptime());
-    const loadavg = os.loadavg();
-    const cpus = os.cpus()?.length || 1;
-
-    const freemem = os.freemem();
-    const totalmem = os.totalmem();
-    const memory = totalmem > 0 ? Math.round(100 - (freemem / totalmem) * 100) : 0;
-
-    const disk = readDisk();
-
-    // users/sessions
-    const [usersList, sessionsRaw] = await Promise.all([
-      vpnService.listUsers().catch(() => []),
-      vpnService.sessionListRaw().catch(() => ""),
+    // Paralel: users & sessions
+    const [usersArr, sessionsArr] = await Promise.all([
+      callListUsers(),
+      callListSessions(),
     ]);
-    const nameSet = new Set((Array.isArray(usersList) ? usersList : []).map(u => u && u.name).filter(Boolean));
-    const totalUsers = nameSet.size;
 
-    let onlineUsers = 0;
-    if (sessionsRaw) {
-      const sessions = vpnService.parseSessionList(sessionsRaw);
-      const onlineSet = new Set();
-      for (const s of sessions) {
-        const u = (s["User Name"] || s.user || s.name || "").trim();
-        if (u && u.toLowerCase() !== "securenat") onlineSet.add(u);
-      }
-      onlineUsers = onlineSet.size;
-    }
-    const offlineUsers = Math.max(0, totalUsers - onlineUsers);
+    const totalUsers = Array.isArray(usersArr) ? usersArr.length : 0;
+
+    const onlineSet = new Set(
+      (Array.isArray(sessionsArr) ? sessionsArr : [])
+        .map(s => normUser(s?.username || s?.UserName || s?.user || s?.User || s?.['User Name']))
+        .filter(Boolean)
+    );
+
+    const online = onlineSet.size;
+    const offline = Math.max(0, totalUsers - online);
+
+    const mem = getMem();
+    const disk = getDisk();
+    const net = sampleNet();
+    const uptime = getUptime();
 
     res.json({
-      // kompat lama
-      uptime: uptimeSystem,
-      loadavg, freemem, totalmem, cpus,
-      timestamp: new Date().toISOString(),
-
-      // baru
-      uptimeSystem,
-      memory,
+      success: true,
+      cpu: { percent: +cpuPercent.toFixed(2) },
+      mem,
       disk,
-
-      net: {
-        // rate sekarang (bits/s)
-        rx_bps: snap.rx_bps,
-        tx_bps: snap.tx_bps,
-
-        // total bytes kumulatif (kalau perlu)
-        rx_total: snap.totals.rx,
-        tx_total: snap.totals.tx,
-
-        // riwayat rate (bukan total)
-        history: RATE_HISTORY.slice(-288) // ~24 menit terakhir @5s
-      },
-
-      users: { total: totalUsers, online: onlineUsers, offline: offlineUsers },
-      totalUsers, onlineUsers, offlineUsers,
+      net, // { rxBps, txBps, rxBytesTotal, txBytesTotal, ts }
+      uptime,
+      users: { total: totalUsers, online, offline },
+      ts: Date.now(),
+      lastError: null,
+      lastRefreshTs: Date.now(),
+      durationMs: Date.now() - tsStart,
     });
-  } catch (e) {
-    res.status(503).json({ success: false, error: e.message || String(e) });
+  } catch (err) {
+    console.error('metrics error:', err?.stack || err);
+    res.status(503).json({
+      success: false,
+      message: 'metrics_unavailable',
+      ts: Date.now(),
+      error: String(err && err.message || err),
+    });
   }
 });
 

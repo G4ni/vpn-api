@@ -1,61 +1,45 @@
 // routes/cleanup.js
-const express = require('express');
+const express = require("express");
+const apiKey = require("../middleware/apiKey");
+const cleanup = require("../services/cleanupService");
+
 const router = express.Router();
-const vpn = require('../services/vpnService');
+router.use(apiKey);
 
-// Hapus user yang tidak login > N hari (default 30)
-router.post('/inactive', async (req, res) => {
-  const days = Number(req.body?.days) || 30;
-  const now = Date.now();
-  const thresholdMs = days * 24 * 60 * 60 * 1000;
+router.get("/cleanup/summary", (req, res) => {
+  res.json({ success: true, ...cleanup.getSummary() });
+});
 
+router.get("/cleanup/preview", async (req, res) => {
   try {
-    const users = await vpn.listUsers(); // { name, group, ... }
-    const checked = [];
-    const deleted = [];
-    const skipped = [];
+    const cand = await cleanup.getPreview();
+    res.json({ success: true, candidates: cand });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
 
-    // Lewati user khusus
-    const skipNames = new Set(['SecureNAT', 'DEFAULT', 'admin', 'anonymous']);
+router.post("/cleanup/config", (req, res) => {
+  const out = cleanup.updateConfig(req.body || {});
+  res.json({ success: true, ...out });
+});
 
-    for (const u of users) {
-      if (!u?.name || skipNames.has(u.name)) { skipped.push({ name: u?.name, reason: 'system/skip' }); continue; }
+router.post("/cleanup/run", async (req, res) => {
+  try {
+    const r = await cleanup.runOnce(true);
+    res.json({ success: true, ...r, ...cleanup.getSummary() });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
 
-      try {
-        const detail = await vpn.getUserDetail(u.name);
-        const last = vpn.parseLastLogin(detail); // Date | null
-        let inactiveMs;
-
-        if (last) {
-          inactiveMs = now - last.getTime();
-        } else {
-          // Belum pernah login → anggap sangat lama agar terjaring
-          inactiveMs = Number.MAX_SAFE_INTEGER;
-        }
-
-        const inactiveDays = Math.floor(inactiveMs / (24*60*60*1000));
-        const shouldDelete = inactiveMs >= thresholdMs;
-
-        checked.push({ name: u.name, lastLogin: last ? last.toISOString() : null, inactiveDays, shouldDelete });
-
-        if (shouldDelete) {
-          await vpn.deleteUser(u.name);
-          deleted.push({ name: u.name, lastLogin: last ? last.toISOString() : null, inactiveDays });
-        }
-      } catch (e) {
-        skipped.push({ name: u.name, reason: e.message || String(e) });
-      }
-    }
-
-    res.json({
-      success: true,
-      daysThreshold: days,
-      summary: { total: users.length, checked: checked.length, deleted: deleted.length, skipped: skipped.length },
-      deleted,
-      skipped,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message || String(err) });
+// routes/cleanup.js (tambahkan DI BAWAH router.use(apiKey))
+router.get("/cleanup/debug-exports", (req, res) => {
+  try {
+    const vpn = require("../services/vpnService");
+    res.json({ success: true, exports: Object.keys(vpn) });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
   }
 });
 
