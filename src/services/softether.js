@@ -1,7 +1,5 @@
 // src/services/softether.js
-const { execFile } = require('child_process');
-const { promisify } = require('util');
-const exec = promisify(execFile);
+const { queuedVpncmd } = require('../../utils/softetherExec');
 
 const SE_HOST = process.env.VPN_SERVER || process.env.SOFTETHER_HOST || '127.0.0.1';
 const SE_HUB  = process.env.VPN_HUB    || process.env.SOFTETHER_HUB  || 'DEFAULT';
@@ -14,36 +12,9 @@ function seArgs(cmd, extra = []) {
   return [...base, cmd, ...extra];
 }
 
-// helper retry dengan backoff
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function runVpnCmd(cmd, extra = [], { retries = 4, backoffMs = 250 } = {}) {
+async function runVpnCmd(cmd, extra = [], opts) {
   const args = seArgs(cmd, extra);
-
-  // Gunakan flock agar hanya satu vpncmd jalan bersamaan.
-  // Catatan: jalankan vpncmd lewat bash -lc supaya flock tersedia.
-  const flocked = [
-    '-lc',
-    `flock -w 5 /tmp/vpncmd.lock vpncmd ${args.map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ')}`
-  ];
-
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      const { stdout } = await exec('/bin/bash', flocked, { maxBuffer: 1024 * 1024 });
-      return stdout;
-    } catch (err) {
-      const msg = String(err?.stdout || err?.stderr || err?.message || err);
-      // Kalau busy / lock / timeout —> retry dengan backoff
-      if (/busy|locked|try again|timeout/i.test(msg) && attempt < retries) {
-        await sleep(backoffMs * Math.pow(2, attempt)); // backoff eksponensial
-        lastErr = err;
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr || new Error('vpncmd failed after retries');
+  return queuedVpncmd(args, opts);
 }
 
 // Contoh API yang dipakai route lama kamu:

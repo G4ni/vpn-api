@@ -1,22 +1,22 @@
-const { exec } = require('child_process');
+const { queuedVpncmd } = require('./utils/softetherExec');
 require('dotenv').config();
 
-function runVpnCmd(commands) {
-  return new Promise((resolve, reject) => {
-    const server = process.env.SE_SERVER || '127.0.0.1';
-    const port = process.env.SE_PORT || '5555';
-    const hub = process.env.SE_HUB || 'VPN';
-    const hubPass = process.env.SE_HUB_PASSWORD || '';
+async function runVpnCmd(commands) {
+  const server = process.env.SE_SERVER || '127.0.0.1';
+  const port = process.env.SE_PORT || '5555';
+  const hub = process.env.SE_HUB || 'VPN';
+  const hubPass = process.env.SE_HUB_PASSWORD || '';
 
-    const block = Array.isArray(commands) ? commands.join('\n') : commands;
-    // vpncmd server:port /SERVER /CMD "Hub <hub>\nPassword <pass>\n<commands>\nExit"
-    const cmd = `vpncmd ${server}:${port} /SERVER /CMD "Hub ${hub}\nPassword ${hubPass}\n${block}\nExit"`;
+  const block = Array.isArray(commands) ? commands.join('\n') : commands;
+  const args = [
+    `${server}:${port}`,
+    '/SERVER',
+    '/CMD',
+    `Hub ${hub}\nPassword ${hubPass}\n${block}\nExit`
+  ];
 
-    exec(cmd, { maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(stderr || stdout || err.message));
-      resolve(stdout.toString());
-    });
-  });
+  const out = await queuedVpncmd(args);
+  return out.toString();
 }
 
 async function createUser(email, password) {

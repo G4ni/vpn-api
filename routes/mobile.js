@@ -6,46 +6,48 @@ const { upsert, get } = require('../utils/pairStore');
 const { ensureAndroidIp } = require('../utils/ipam');
 
 // Ambil config server lokal
-const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.API_KEY || '';
-const BASE = `http://127.0.0.1:${PORT}/api`; // panggil endpoint lama di server ini
 
-// Helper panggil endpoint lama (re-use implementasi kamu yang sudah stabil)
-// Helper panggil endpoint lama (re-use implementasi kamu yang sudah stabil)
+// Helper panggil endpoint lama (fallback prefix + retry ketika busy)
 async function callOldAPI(method, path, body) {
   const PORT = process.env.PORT || 3000;
   const API_KEY = process.env.API_KEY || '';
-  const ORIG = `http://127.0.0.1:${PORT}`;   // tanpa /api
-  const TRY = [
-    `${ORIG}/api${path}`,  // coba dengan /api dulu (sesuai README)
-    `${ORIG}${path}`       // fallback tanpa /api (kalau server pasang route langsung)
+  const ORIG = `http://127.0.0.1:${PORT}`;
+  const urls = [
+    `${ORIG}/api${path}`,
+    `${ORIG}${path}`
   ];
 
   let lastErr;
-  for (const url of TRY) {
-    const res = await fetch(url, {
-      method,
-      headers: {
-        'x-api-key': API_KEY,
-        ...(body ? { 'Content-Type': 'application/json' } : {})
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
+  for (const url of urls) {
+    for (let i = 0; i < 3; i++) {
+      try {
+        const res = await fetch(url, {
+          method,
+          headers: {
+            'x-api-key': API_KEY,
+            ...(body ? { 'Content-Type': 'application/json' } : {})
+          },
+          body: body ? JSON.stringify(body) : undefined
+        });
 
-    // sukses → kembalikan JSON / text
-    const text = await res.text();
-    let data; try { data = JSON.parse(text); } catch { data = text; }
-    if (res.ok) return data;
+        const text = await res.text();
+        if (/busy|locked|try again|timeout/i.test(text) && i < 2) {
+          await new Promise(r => setTimeout(r, 200 * Math.pow(2, i)));
+          continue;
+        }
+        let data; try { data = JSON.parse(text); } catch { data = text; }
+        if (res.ok) return data;
 
-    // kalau jelas 404 / "Cannot ..." → coba prefix berikutnya
-    const msg = (data && data.error) ? String(data.error) : String(text);
-    if ((res.status === 404) || /Cannot\s+(GET|POST)/i.test(msg)) {
-      lastErr = new Error(msg);
-      continue; // fallback ke URL berikutnya
+        const msg = (data && data.error) ? String(data.error) : String(text);
+        if ((res.status === 404) || /Cannot\s+(GET|POST)/i.test(msg)) {
+          lastErr = new Error(msg);
+          break; // coba url berikutnya
+        }
+        throw new Error(msg || `HTTP ${res.status}`);
+      } catch (err) {
+        lastErr = err;
+      }
     }
-
-    // error lain → hentikan
-    throw new Error(msg || `HTTP ${res.status}`);
   }
   throw lastErr || new Error('Upstream route not found (both with and without /api)');
 }
@@ -76,7 +78,7 @@ router.post('/ensure', async (req, res) => {
 
     // 3) Alokasikan IP /32 Android & simpan
     const ip32 = ensureAndroidIp(email);
-    const pair = upsert({ email, androidIp: ip32 });
+    upsert({ email, androidIp: ip32 });
 
     // 4) Siapkan URL OVPN (wrapper redirect disediakan di /api/mobile/ovpn/:email)
     const ovpnUrl = `/api/mobile/ovpn/${encodeURIComponent(email)}`;
@@ -85,8 +87,7 @@ router.post('/ensure', async (req, res) => {
     return res.json({
       success: true,
       android: { ip32, ovpnDownloadUrl: ovpnUrl },
-      mikrotik: { scriptUrl: mkUrl },
-      pair
+      mikrotik: { scriptUrl: mkUrl }
     });
   } catch (err) {
     return res.status(500).json({ success: false, error: String(err.message || err) });
@@ -99,9 +100,21 @@ router.post('/ensure', async (req, res) => {
  */
 router.get('/ovpn/:email', async (req, res) => {
   const email = req.params.email;
-  // forward header api-key agar konsisten (meski dipanggil langsung user/app juga boleh)
-  res.set('x-proxy-note', 'redirect-to-ovpn-generator');
-  return res.redirect(302, `/api/vpn/ovpn?email=${encodeURIComponent(email)}`);
+  const path = `/vpn/ovpn?email=${encodeURIComponent(email)}`;
+  const PORT = process.env.PORT || 3000;
+  const base = `http://127.0.0.1:${PORT}`;
+  const API_KEY = process.env.API_KEY || '';
+  const tries = [`/api${path}`, path];
+
+  for (const p of tries) {
+    try {
+      const r = await fetch(`${base}${p}`, { headers: { 'x-api-key': API_KEY } });
+      if (r.status !== 404) {
+        return res.redirect(302, p);
+      }
+    } catch {}
+  }
+  return res.redirect(302, `/api${path}`);
 });
 
 /**
