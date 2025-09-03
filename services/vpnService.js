@@ -1,5 +1,5 @@
 // services/vpnService.js
-const { exec, spawn } = require('child_process');
+const { queuedVpncmd } = require('../utils/softetherExec');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
@@ -28,20 +28,22 @@ const cfg = {
   hub: process.env.VPN_HUB || 'VPN',
   hubPassword: process.env.VPN_HUB_PASS || 'asaku',
   server: process.env.VPN_SERVER || 'localhost',
-  vpncmd: process.env.VPNCMD_PATH || '/usr/bin/vpncmd',
   debug: process.env.DEBUG_VPN === 'true'
 };
 
-function runVpnCmd(command) {
-  return new Promise((resolve, reject) => {
-    const cmd = `${cfg.vpncmd} ${cfg.server} /SERVER /HUB:${cfg.hub} /PASSWORD:${cfg.hubPassword} /CMD ${command}`;
-    if (cfg.debug) console.log('[vpnService] exec:', cmd);
-    exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (cfg.debug) console.log('[vpnService] stdout:', stdout, '\n[stderr]:', stderr);
-      if (err) return reject(stderr || stdout || err.message);
-      resolve(stdout.toString().trim());
-    });
-  });
+async function runVpnCmd(command) {
+  const args = [
+    cfg.server,
+    '/SERVER',
+    `/HUB:${cfg.hub}`,
+    `/PASSWORD:${cfg.hubPassword}`,
+    '/CMD',
+    command
+  ];
+  if (cfg.debug) console.log('[vpnService] args:', args.join(' '));
+  const stdout = await queuedVpncmd(args);
+  if (cfg.debug) console.log('[vpnService] stdout:', stdout);
+  return stdout.toString().trim();
 }
 
 async function createUser(username, password = 'asaku123') {
@@ -189,32 +191,18 @@ function parseLastLogin(userDetail) {
 }
 
 // Interactive helpers for ACL
-function vpncmdInteractive(lines = []) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      cfg.server,
-      '/SERVER',
-      `/HUB:${cfg.hub}`,
-      `/PASSWORD:${cfg.hubPassword}`
-    ];
-    const p = spawn(cfg.vpncmd, args, { stdio: ['pipe', 'pipe', 'pipe'] });
-
-    let out = '', err = '';
-    p.stdout.on('data', d => out += d.toString());
-    p.stderr.on('data', d => err += d.toString());
-
-    p.on('error', reject);
-    p.on('close', code => {
-      if (code === 0 && /The command completed successfully\./i.test(out)) {
-        return resolve(out.trim());
-      }
-      if (code === 0) return resolve(out.trim());
-      reject(new Error(err || out || `vpncmd exited ${code}`));
-    });
-
-    for (const line of lines) p.stdin.write(line + '\n');
-    p.stdin.end();
-  });
+async function vpncmdInteractive(lines = []) {
+  const block = lines.join('\n');
+  const args = [
+    cfg.server,
+    '/SERVER',
+    `/HUB:${cfg.hub}`,
+    `/PASSWORD:${cfg.hubPassword}`,
+    '/CMD',
+    block
+  ];
+  const out = await queuedVpncmd(args);
+  return out.trim();
 }
 
 async function addAclPass(srcUser, dstUser, priority = 10, memo = '') {

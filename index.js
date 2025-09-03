@@ -42,8 +42,8 @@ app.use('/vpn', apiKey, userRoutes);
 app.use('/hub', apiKey, hubRoutes);
 app.use('/acl', apiKey, aclRoutes);
 app.use("/", require("./routes/cleanup"));
-app.use('/mobile', mobile);
 app.use('/api/mobile', apiKey, mobile);
+app.use('/mobile', apiKey, mobile);
 
 
 
