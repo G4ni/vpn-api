@@ -11,6 +11,7 @@ const corsMw = require('./middleware/cors');
 const limiter = require('./middleware/rateLimit');
 const toolsRoutes = require('./routes/tools');
 const aclRoutes = require('./routes/acl');
+const mobile = require('./routes/mobile');
 
 
 
@@ -41,6 +42,8 @@ app.use('/vpn', apiKey, userRoutes);
 app.use('/hub', apiKey, hubRoutes);
 app.use('/acl', apiKey, aclRoutes);
 app.use("/", require("./routes/cleanup"));
+app.use('/mobile', mobile);
+app.use('/api/mobile', apiKey, mobile);
 
 
 
